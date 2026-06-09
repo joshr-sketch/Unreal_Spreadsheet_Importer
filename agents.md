@@ -21,13 +21,36 @@ The `%` column targets a column with the same name (minus the `%`). Example:
 Patches use JSON with friendly block names:
 
 ```json
+{"ItemName": "Lucky Stone", "ItemDescription": "A stone that brings good fortune."}
 {"MaxStackSize": {"MaxStackSize": 25}}
 {"Pickup": {"bCanBeDroppedFromInventory": false}}
 {"Tags": {"Tags": ["Husky.Item.Resource", "Husky.Item.Favorite"]}}
 {"CampStructure": {"CampStructureId": "Husky.Structure.BurrBaby-Essence"}}
 ```
 
-## Supported Friendly Names
+## Base Properties (ItemDefinitionBase)
+
+These properties are set directly on the ItemDefinition, not in the DataList:
+
+| Friendly Name | Property |
+|---------------|----------|
+| `ItemName` / `Item Name` / `Name` | ItemName (FText) |
+| `ItemDescription` / `Item Description` / `Description` | ItemDescription (FText) |
+| `ItemShortDescription` / `Item Short Description` / `Short Description` / `ShortDescription` | ItemShortDescription (FText) |
+| `ReleaseVersion` / `Release Version` / `FortReleaseVersion` | ReleaseVersion (FortReleaseVersion struct) |
+
+Base properties take simple string values (not nested objects):
+```json
+{"ItemName": "Lucky Stone", "ItemDescription": "A lucky stone.", "ReleaseVersion": "Future"}
+```
+
+ReleaseVersion accepts either a simple string or a dict:
+```json
+{"ReleaseVersion": "Future"}
+{"ReleaseVersion": {"VersionName": "Future"}}
+```
+
+## Supported Friendly Names (Component Data Blocks)
 
 | Friendly Name | Full Script Path |
 |---------------|------------------|
@@ -66,6 +89,35 @@ The script only checks out and saves assets when values actually change. If the 
 
 # Constraints
 
-Curly brackets `{}` in Unreal blueprints are interpreted as script inputs. Only use them for:
+## CRITICAL: Curly Brace Restrictions
+
+This script runs inside an Unreal Blueprint Format node. The Format node interprets curly braces `{}` as format placeholders and **DELETES anything inside them**.
+
+**FORBIDDEN patterns (will silently break the script):**
+- Dict literals: `my_dict = {"key": "value"}` - BROKEN, becomes `my_dict = {}`
+- F-strings: `f"Row {index}"` - BROKEN, becomes `f"Row "`
+- Any `{content}`: `print("{hello}")` - BROKEN
+
+**ALLOWED patterns:**
+- Empty braces: `my_dict = {}` - OK
+- Format variables: `{TSV}` and `{DTPath}` - OK (intentional placeholders)
+- `dict()` constructor: `dict([("k", "v")])` - OK
+- Tuples: `(("k", "v"),)` - OK
+
+**Always use tuples or `dict()` constructor instead of dict literals!**
+
+The only permitted curly brace placeholders are:
 - `{TSV}` - the pasted TSV data
 - `{DTPath}` - the DataTable asset path
+
+### AI Agent Reminder
+
+**When editing `importer_script_python.py`, NEVER use curly braces with content inside - not even in comments!**
+
+Comments like `# Convert {"TagName": "foo"}` will have content stripped, becoming `# Convert {}`.
+
+Use `dict()` notation in comments instead:
+- BAD: `# Example: {"Key": "Value"}`
+- GOOD: `# Example: dict(Key="Value")`
+
+This applies to ALL text in the file, including strings, comments, and docstrings.
