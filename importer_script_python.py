@@ -349,41 +349,92 @@ def _resolve_base_property(name):
     return None
 
 
+def _check_base_property_change(item_def, prop_name, value):
+    """
+    Check if a base property needs to change.
+    Returns (needs_change, new_value, current_value)
+    """
+    str_value = str(value) if value is not None else ""
+    try:
+        current_value = item_def.get_editor_property(prop_name)
+        current_str = str(current_value) if current_value else ""
+        if current_str == str_value:
+            return False, str_value, current_str
+        return True, str_value, current_str
+    except Exception:
+        # If we can't read, assume we need to set
+        return True, str_value, None
+
+
+def _check_release_version_change(item_def, value):
+    """
+    Check if ReleaseVersion needs to change.
+    Returns (needs_change, version_name, current_version_name, prop_name_to_use)
+    """
+    if isinstance(value, dict):
+        version_name = value.get("VersionName", value.get("versionName", ""))
+    else:
+        version_name = str(value) if value is not None else ""
+
+    property_names_to_try = ("ReleaseVersion", "FortReleaseVersion", "releaseVersion")
+
+    for prop_name in property_names_to_try:
+        try:
+            release_version = item_def.get_editor_property(prop_name)
+            try:
+                current_version_name = release_version.get_editor_property("VersionName")
+                if str(current_version_name) == version_name:
+                    return False, version_name, str(current_version_name), prop_name
+                return True, version_name, str(current_version_name), prop_name
+            except Exception:
+                # Can't read current, assume we need to set
+                return True, version_name, None, prop_name
+        except Exception:
+            continue
+
+    # No valid property found, will need to try setting
+    return True, version_name, None, "ReleaseVersion"
+
+
 def _apply_base_properties(item_def, patch_data, row_index, errors, modified_assets):
     """
     Apply base properties (ItemName, ItemDescription, ItemShortDescription, ReleaseVersion)
     to an ItemDefinitionBase.
     Returns the patch_data dict with base property keys removed (so they aren't processed as component blocks).
+
+    Uses collect-then-apply pattern: first checks all properties for changes,
+    then only modifies the asset if there are actual changes.
     """
     remaining_patch_data = {}
     asset_path = item_def.get_path_name()
 
+    # Phase 1: Collect changes needed (read-only)
+    changes_needed = []  # List of (prop_name, new_value, is_release_version)
+
     for key, value in patch_data.items():
         prop_name = _resolve_base_property(key)
         if prop_name is not None:
-            try:
-                # Special handling for ReleaseVersion (struct property)
-                if prop_name == "ReleaseVersion":
-                    _set_release_version(item_def, value, row_index, errors, modified_assets, asset_path)
-                    continue
+            if prop_name == "ReleaseVersion":
+                needs_change, version_name, current, prop_to_use = _check_release_version_change(item_def, value)
+                if needs_change:
+                    changes_needed.append((prop_to_use, value, True, key))
+            else:
+                needs_change, new_val, current = _check_base_property_change(item_def, prop_name, value)
+                if needs_change:
+                    changes_needed.append((prop_name, new_val, False, key))
+        else:
+            remaining_patch_data[key] = value
 
-                # For FText properties, Unreal Python accepts plain strings
-                # and converts them appropriately
-                str_value = str(value) if value is not None else ""
+    # Phase 2: Apply changes only if there are any
+    if not changes_needed:
+        return remaining_patch_data
 
-                # Try to get current value for change detection
-                try:
-                    current_value = item_def.get_editor_property(prop_name)
-                    # FText comparison - convert to string for comparison
-                    current_str = str(current_value) if current_value else ""
-                    if current_str == str_value:
-                        # No change needed
-                        continue
-                except Exception:
-                    pass  # If we can't read, just try to set
-
-                # Set the property
-                item_def.set_editor_property(prop_name, str_value)
+    for prop_name, new_value, is_release_version, original_key in changes_needed:
+        try:
+            if is_release_version:
+                _set_release_version(item_def, new_value, row_index, errors, modified_assets, asset_path)
+            else:
+                item_def.set_editor_property(prop_name, new_value)
                 modified_assets.add(asset_path)
                 unreal.log(
                     "Row "
@@ -391,23 +442,20 @@ def _apply_base_properties(item_def, patch_data, row_index, errors, modified_ass
                     + ": Set "
                     + str(prop_name)
                     + " = "
-                    + str(str_value)[:50]
-                    + ("..." if len(str_value) > 50 else "")
+                    + str(new_value)[:50]
+                    + ("..." if len(str(new_value)) > 50 else "")
                 )
-            except Exception as ex:
-                errors.append(
-                    "Row "
-                    + str(row_index + 1)
-                    + ": Failed setting base property "
-                    + str(key)
-                    + " ("
-                    + str(prop_name)
-                    + ") - "
-                    + str(ex)
-                )
-        else:
-            # Not a base property, keep for component block processing
-            remaining_patch_data[key] = value
+        except Exception as ex:
+            errors.append(
+                "Row "
+                + str(row_index + 1)
+                + ": Failed setting base property "
+                + str(original_key)
+                + " ("
+                + str(prop_name)
+                + ") - "
+                + str(ex)
+            )
 
     return remaining_patch_data
 
@@ -575,7 +623,293 @@ def _probe_property(ides, item_def, block_name, prop_name):
     return "unknown", None
 
 
+def _compute_new_value(prop_type_label, value, current_value):
+    """
+    Compute what the new value should be for a given property type and input value.
+    Returns (new_value, comparable_new) where:
+      - new_value is the value to pass to the setter
+      - comparable_new is a value that can be compared with current_value
+    For some types these are the same; for others they differ.
+    """
+    if prop_type_label == "bool":
+        new_val = bool(value)
+        return new_val, new_val
+
+    elif prop_type_label == "float":
+        new_val = float(value)
+        return new_val, new_val
+
+    elif prop_type_label == "scalable_float":
+        if isinstance(value, dict):
+            if "value" in value:
+                new_val = float(value["value"])
+            else:
+                new_val = float(value.get("value", 0))
+        else:
+            new_val = float(value)
+        # For scalable_float, we compare against current_value.value
+        return new_val, new_val
+
+    elif prop_type_label == "gameplay_tag_container":
+        # Build new tag names set for comparison
+        if isinstance(value, list):
+            new_tag_names = set(value)
+        else:
+            new_tag_names = set([str(value)]) if value else set()
+        # Return the original value for setter, tag names for comparison
+        return value, new_tag_names
+
+    elif prop_type_label == "generic_text":
+        # Handle single FGameplayTag structs passed as dict
+        # JSON dict with TagName key -> Unreal struct text
+        if isinstance(value, dict) and "TagName" in value:
+            tag_name = value["TagName"]
+            new_val = '(TagName="' + str(tag_name) + '")'
+        elif isinstance(value, dict):
+            # For other dict values, convert to Unreal struct format
+            parts = []
+            for k, v in value.items():
+                if isinstance(v, str):
+                    parts.append(str(k) + '="' + str(v) + '"')
+                elif isinstance(v, bool):
+                    parts.append(str(k) + "=" + str(v))
+                else:
+                    parts.append(str(k) + "=" + str(v))
+            new_val = "(" + ",".join(parts) + ")"
+        else:
+            new_val = str(value)
+        return new_val, new_val
+
+    else:
+        # Unknown type - stringify
+        if isinstance(value, list):
+            new_val = json.dumps(value)
+        else:
+            new_val = str(value)
+        return new_val, new_val
+
+
+def _get_comparable_current(prop_type_label, current_value):
+    """
+    Get a comparable representation of the current value.
+    """
+    if prop_type_label == "scalable_float":
+        # Compare against the .value attribute
+        try:
+            return current_value.value
+        except Exception:
+            return None
+
+    elif prop_type_label == "gameplay_tag_container":
+        # Get current tag names as a set
+        current_tag_names = set()
+        try:
+            for t in current_value.gameplay_tags:
+                tag_str = None
+
+                # Method 1: Use get_editor_property("TagName") - standard Unreal Python API
+                try:
+                    tn = t.get_editor_property("TagName")
+                    if tn is not None:
+                        tag_str = str(tn)
+                        if tag_str and not tag_str.startswith("<"):
+                            current_tag_names.add(tag_str)
+                            continue
+                except Exception:
+                    pass
+
+                # Method 2: Try export_text() which might give us a parseable format
+                if tag_str is None:
+                    try:
+                        exported = t.export_text()
+                        if exported and not exported.startswith("<"):
+                            # export_text might give us (TagName="...") format
+                            # Extract the tag name from it
+                            if 'TagName="' in exported:
+                                start = exported.find('TagName="') + 9
+                                end = exported.find('"', start)
+                                if end > start:
+                                    tag_str = exported[start:end]
+                            else:
+                                tag_str = exported
+                    except Exception:
+                        pass
+
+                # Method 3: Try to_tuple() which might give us the tag name
+                if tag_str is None:
+                    try:
+                        tup = t.to_tuple()
+                        if tup and len(tup) > 0:
+                            # First element might be the tag name
+                            tag_str = str(tup[0])
+                    except Exception:
+                        pass
+
+                if tag_str and not tag_str.startswith("<"):
+                    current_tag_names.add(tag_str)
+        except Exception as ex:
+            unreal.log("DEBUG tag container error: " + str(ex))
+        return current_tag_names
+
+    else:
+        # For bool, float, generic_text - direct comparison
+        return current_value
+
+
+def _normalize_asset_path(path_str):
+    """
+    Normalize asset paths for comparison.
+    - Strips /Script/ClassName'...' wrapper and returns just the inner path
+    - Normalizes Blueprint class path separators (colon vs period before class suffix)
+    """
+    if not isinstance(path_str, str):
+        return path_str
+
+    s = path_str.strip()
+
+    # Handle /Script/ClassName'/Path/To/Asset.Asset' format
+    # Extract the inner path between the quotes
+    if s.startswith("/Script/") and "'" in s:
+        q1 = s.find("'")
+        q2 = s.rfind("'")
+        if q1 != -1 and q2 > q1:
+            s = s[q1 + 1:q2]
+
+    # Normalize Blueprint class path separators
+    # Unreal sometimes stores paths with colon (BP_Name:1_N1) vs period (BP_Name.1_N1)
+    # Pattern: word boundary followed by colon and then a digit or letter
+    # Replace :X with .X where X starts a class/object suffix
+    s = re.sub(r':(\d)', r'.\1', s)
+
+    return s
+
+
+def _normalize_struct_text(text):
+    """
+    Normalize Unreal struct text for comparison.
+    Handles case differences in property names like TagName vs Tagname.
+    """
+    if not isinstance(text, str):
+        return text
+
+    # For struct format like (TagName="value"), normalize to lowercase property names
+    # This is a simple approach - lowercase the part before = in each property
+    # Note: re is already imported at module level
+
+    # Match property assignments like PropName="value" or PropName=value
+    def normalize_prop(match):
+        prop_name = match.group(1).lower()
+        rest = match.group(2)
+        return prop_name + rest
+
+    # Pattern: word followed by = and either quoted string or simple value
+    normalized = re.sub(r'(\w+)(="[^"]*"|=[^,)]+)', normalize_prop, text)
+    return normalized
+
+
+def _needs_change(prop_type_label, current_value, value):
+    """
+    Determine if a property needs to be changed.
+    Returns (needs_change, new_value, error_message)
+    where new_value is the value to set, or None if no change needed.
+    """
+    try:
+        new_val, comparable_new = _compute_new_value(prop_type_label, value, current_value)
+        comparable_current = _get_comparable_current(prop_type_label, current_value)
+
+        # For generic_text, normalize asset paths and struct text before comparing
+        if prop_type_label == "generic_text":
+            comparable_new = _normalize_asset_path(comparable_new)
+            comparable_current = _normalize_asset_path(comparable_current)
+            # Also normalize struct text for case differences
+            comparable_new = _normalize_struct_text(comparable_new)
+            comparable_current = _normalize_struct_text(comparable_current)
+
+        # For gameplay_tag_container, normalize tag names (strip any whitespace, etc)
+        if prop_type_label == "gameplay_tag_container":
+            # Both should be sets of strings - normalize them
+            if isinstance(comparable_new, set):
+                comparable_new = set(str(t).strip() for t in comparable_new)
+            if isinstance(comparable_current, set):
+                comparable_current = set(str(t).strip() for t in comparable_current)
+
+        # Debug: log the actual values being compared
+        if comparable_current != comparable_new:
+            unreal.log(
+                "DEBUG compare: current="
+                + repr(comparable_current)[:100]
+                + " vs new="
+                + repr(comparable_new)[:100]
+            )
+
+        if comparable_current == comparable_new:
+            return False, None, None
+
+        return True, new_val, None
+    except Exception as ex:
+        return False, None, str(ex)
+
+
+def _apply_property_change(ides, item_def, block_name, prop_name, prop_type_label, new_val, original_value, value):
+    """
+    Apply a single property change. Returns (success, error_message).
+    For scalable_float and gameplay_tag_container, we need special handling.
+    """
+    try:
+        if prop_type_label == "bool":
+            ides.set_property_value_bool(item_def, block_name, prop_name, new_val)
+            return True, None
+
+        elif prop_type_label == "float":
+            ides.set_property_value_float(item_def, block_name, prop_name, new_val)
+            return True, None
+
+        elif prop_type_label == "scalable_float":
+            # For scalable_float, we modify the current value object
+            original_value.value = new_val
+            ides.set_property_value_scalable_float(item_def, block_name, prop_name, original_value)
+            return True, None
+
+        elif prop_type_label == "gameplay_tag_container":
+            # For tag container, clear and rebuild
+            container = original_value
+            while len(container.gameplay_tags) > 0:
+                container.gameplay_tags.pop()
+
+            if isinstance(value, list):
+                new_tag_names = value
+            else:
+                new_tag_names = [str(value)] if value else []
+
+            for tag_name in new_tag_names:
+                tag = ides.find_existing_tag_by_name(tag_name)
+                if tag:
+                    container.gameplay_tags.append(tag)
+
+            ides.set_property_value_gameplay_tag_container(item_def, block_name, prop_name, container)
+            return True, None
+
+        elif prop_type_label == "generic_text":
+            ides.set_property_value_generic_text(item_def, block_name, prop_name, new_val)
+            return True, None
+
+        else:
+            # Unknown type - try generic text
+            ides.set_property_value_generic_text(item_def, block_name, prop_name, new_val)
+            return True, None
+
+    except Exception as ex:
+        return False, str(ex)
+
+
 def apply_itemdefinition_patches(patch_rows):
+    """
+    Apply patches to ItemDefinition assets.
+
+    Uses collect-then-apply pattern to avoid unnecessary source control checkouts:
+    1. First, probe all properties to detect which ones need changes (read-only)
+    2. Only if changes are needed, call add_component_data_entry and apply changes
+    """
     ides = unreal.get_editor_subsystem(unreal.ItemDefinitionEditorSubsystem)
     if ides is None:
         return ["ItemDefinitionEditorSubsystem not found."], []
@@ -628,7 +962,7 @@ def apply_itemdefinition_patches(patch_rows):
                 )
                 continue
 
-            # Apply base properties first (ItemName, ItemDescription, ItemShortDescription)
+            # Apply base properties first (uses collect-then-apply internally)
             # This returns the remaining patch data (with base properties removed)
             patch_data = _apply_base_properties(
                 item_def, patch_data, row_index, errors, modified_assets
@@ -641,6 +975,12 @@ def apply_itemdefinition_patches(patch_rows):
             # Convert to Python list and extract path names for comparison
             component_types_raw = list(ides.get_all_component_data_type(item_def))
             component_types = [c.get_path_name() for c in component_types_raw]
+
+            # ============================================================
+            # PHASE 1: Collect all changes needed (read-only probing)
+            # ============================================================
+            # Structure: dict of block_name -> list of (prop_name, prop_type, new_val, current_val, original_value)
+            changes_by_block = {}
 
             for block_name_input, properties in patch_data.items():
 
@@ -668,275 +1008,110 @@ def apply_itemdefinition_patches(patch_rows):
                     )
                     continue
 
-                # Ensure the component data entry exists (best effort)
+                # Probe each property to check if it needs changing
+                for prop_name, value in properties.items():
+                    try:
+                        # Probe actual property type (read-only)
+                        prop_type_label, current_value = _probe_property(
+                            ides, item_def, block_name, prop_name
+                        )
+
+                        # Check if change is needed
+                        needs_change, new_val, error_msg = _needs_change(
+                            prop_type_label, current_value, value
+                        )
+
+                        if error_msg:
+                            errors.append(
+                                "Row "
+                                + str(row_index + 1)
+                                + ": Error checking "
+                                + str(block_name)
+                                + "."
+                                + str(prop_name)
+                                + " - "
+                                + str(error_msg)
+                            )
+                            continue
+
+                        if needs_change:
+                            if block_name not in changes_by_block:
+                                changes_by_block[block_name] = []
+                            changes_by_block[block_name].append(
+                                (prop_name, prop_type_label, new_val, current_value, value)
+                            )
+
+                            # Debug logging
+                            unreal.log(
+                                "Row "
+                                + str(row_index + 1)
+                                + ": Change detected - "
+                                + str(block_name)
+                                + "."
+                                + str(prop_name)
+                                + " (type="
+                                + str(prop_type_label)
+                                + ")"
+                            )
+
+                    except Exception as ex:
+                        errors.append(
+                            "Row "
+                            + str(row_index + 1)
+                            + ": Error probing "
+                            + str(block_name)
+                            + "."
+                            + str(prop_name)
+                            + " - "
+                            + str(ex)
+                        )
+
+            # ============================================================
+            # PHASE 2: Apply changes only if there are any
+            # ============================================================
+            if not changes_by_block:
+                # No component changes needed for this asset
+                continue
+
+            # Now we know we have changes - apply them
+            for block_name, prop_changes in changes_by_block.items():
+
+                # Ensure the component data entry exists (only now, when we know we have changes)
                 try:
                     ides.add_component_data_entry(item_def, block_name)
                 except Exception:
                     # ignore; add_component_data_entry might fail if already present
                     pass
 
-                for prop_name, value in properties.items():
-                    try:
-                        # Probe actual property type
-                        prop_type_label, current_value = _probe_property(
-                            ides, item_def, block_name, prop_name
-                        )
+                for prop_name, prop_type_label, new_val, current_value, original_input in prop_changes:
+                    success, error_msg = _apply_property_change(
+                        ides, item_def, block_name, prop_name,
+                        prop_type_label, new_val, current_value, original_input
+                    )
 
-                        # Debug logging for troubleshooting
+                    if success:
+                        modified_assets.add(asset.get_path_name())
                         unreal.log(
-                            "DEBUG: "
+                            "Row "
+                            + str(row_index + 1)
+                            + ": Set "
                             + str(block_name)
                             + "."
                             + str(prop_name)
-                            + " -> probe_type="
-                            + str(prop_type_label)
-                            + ", current="
-                            + repr(current_value)
-                            + ", new="
-                            + repr(value)
+                            + " = "
+                            + str(new_val)[:50]
+                            + ("..." if len(str(new_val)) > 50 else "")
                         )
-
-                        # Attempt to set based on the probed type
-                        set_succeeded = False
-
-                        if prop_type_label == "bool":
-                            try:
-                                new_val = bool(value)
-                                if current_value == new_val:
-                                    set_succeeded = True  # No change needed
-                                else:
-                                    ides.set_property_value_bool(
-                                        item_def, block_name, prop_name, new_val
-                                    )
-                                    set_succeeded = True
-                                    modified_assets.add(asset.get_path_name())
-                            except Exception as ex:
-                                errors.append(
-                                    "Row "
-                                    + str(row_index + 1)
-                                    + ": Failed setting bool "
-                                    + str(block_name)
-                                    + "."
-                                    + str(prop_name)
-                                    + " - "
-                                    + str(ex)
-                                )
-
-                        elif prop_type_label == "float":
-                            try:
-                                new_val = float(value)
-                                if current_value == new_val:
-                                    set_succeeded = True  # No change needed
-                                else:
-                                    ides.set_property_value_float(
-                                        item_def, block_name, prop_name, new_val
-                                    )
-                                    set_succeeded = True
-                                    modified_assets.add(asset.get_path_name())
-                            except Exception as ex:
-                                errors.append(
-                                    "Row "
-                                    + str(row_index + 1)
-                                    + ": Failed setting float "
-                                    + str(block_name)
-                                    + "."
-                                    + str(prop_name)
-                                    + " - "
-                                    + str(ex)
-                                )
-
-                        elif prop_type_label == "scalable_float":
-                            try:
-                                # current_value is expected to be an FScalableFloat-like structure
-                                # set its .value if numeric was provided
-                                if isinstance(value, dict):
-                                    # If user provided structured scalable float, try to map
-                                    if "value" in value:
-                                        new_val = float(value["value"])
-                                    else:
-                                        # fallback: attempt convert whole dict to string
-                                        new_val = float(value.get("value", 0))
-                                else:
-                                    new_val = float(value)
-
-                                if current_value.value == new_val:
-                                    set_succeeded = True  # No change needed
-                                else:
-                                    current_value.value = new_val
-                                    ides.set_property_value_scalable_float(
-                                        item_def, block_name, prop_name, current_value
-                                    )
-                                    set_succeeded = True
-                                    modified_assets.add(asset.get_path_name())
-                            except Exception as ex:
-                                errors.append(
-                                    "Row "
-                                    + str(row_index + 1)
-                                    + ": Failed setting scalable float "
-                                    + str(block_name)
-                                    + "."
-                                    + str(prop_name)
-                                    + " - "
-                                    + str(ex)
-                                )
-
-                        elif prop_type_label == "gameplay_tag_container":
-                            try:
-                                # current_value should expose gameplay_tags
-                                container = current_value
-
-                                # Get current tag names for comparison
-                                current_tag_names = set()
-                                for t in container.gameplay_tags:
-                                    try:
-                                        current_tag_names.add(str(t.tag_name))
-                                    except Exception:
-                                        current_tag_names.add(str(t))
-
-                                # Build new tag names set
-                                if isinstance(value, list):
-                                    new_tag_names = set(value)
-                                else:
-                                    new_tag_names = set([str(value)]) if value else set()
-
-                                if current_tag_names == new_tag_names:
-                                    set_succeeded = True  # No change needed
-                                else:
-                                    # Clear the array using native methods
-                                    while len(container.gameplay_tags) > 0:
-                                        container.gameplay_tags.pop()
-
-                                    for tag_name in new_tag_names:
-                                        tag = ides.find_existing_tag_by_name(tag_name)
-                                        if tag:
-                                            container.gameplay_tags.append(tag)
-
-                                    ides.set_property_value_gameplay_tag_container(
-                                        item_def, block_name, prop_name, container
-                                    )
-                                    set_succeeded = True
-                                    modified_assets.add(asset.get_path_name())
-                            except Exception as ex:
-                                # If the property unexpectedly expects objects other than tags,
-                                # fall back to a safe representation below.
-                                errors.append(
-                                    "Row "
-                                    + str(row_index + 1)
-                                    + ": Failed setting gameplay tag container "
-                                    + str(block_name)
-                                    + "."
-                                    + str(prop_name)
-                                    + " - "
-                                    + str(ex)
-                                )
-
-                        elif prop_type_label == "generic_text":
-                            try:
-                                # Handle single FGameplayTag structs passed as dict
-                                # JSON dict with TagName key -> Unreal struct text
-                                # Example: dict(TagName="Some.Tag") becomes (TagName="Some.Tag")
-                                if isinstance(value, dict) and "TagName" in value:
-                                    tag_name = value["TagName"]
-                                    new_val = '(TagName="' + str(tag_name) + '")'
-                                elif isinstance(value, dict):
-                                    # For other dict values, convert to Unreal struct format
-                                    # Example: dict(Key="Value") becomes (Key="Value")
-                                    parts = []
-                                    for k, v in value.items():
-                                        if isinstance(v, str):
-                                            parts.append(str(k) + '="' + str(v) + '"')
-                                        elif isinstance(v, bool):
-                                            parts.append(str(k) + "=" + str(v))
-                                        else:
-                                            parts.append(str(k) + "=" + str(v))
-                                    new_val = "(" + ",".join(parts) + ")"
-                                else:
-                                    new_val = str(value)
-
-                                if current_value == new_val:
-                                    set_succeeded = True  # No change needed
-                                else:
-                                    ides.set_property_value_generic_text(
-                                        item_def, block_name, prop_name, new_val
-                                    )
-                                    set_succeeded = True
-                                    modified_assets.add(asset.get_path_name())
-                            except Exception as ex:
-                                errors.append(
-                                    "Row "
-                                    + str(row_index + 1)
-                                    + ": Failed setting generic text "
-                                    + str(block_name)
-                                    + "."
-                                    + str(prop_name)
-                                    + " - "
-                                    + str(ex)
-                                )
-
-                        else:
-                            # Unknown/unsupported probe result; try safe fallbacks.
-                            # For unknown types, we can't easily detect changes, so always set
-                            try:
-                                # If value is a list, don't assume object array — stringify safely.
-                                if isinstance(value, list):
-                                    ides.set_property_value_generic_text(
-                                        item_def, block_name, prop_name, json.dumps(value)
-                                    )
-                                    set_succeeded = True
-                                    modified_assets.add(asset.get_path_name())
-                                else:
-                                    ides.set_property_value_generic_text(
-                                        item_def, block_name, prop_name, str(value)
-                                    )
-                                    set_succeeded = True
-                                    modified_assets.add(asset.get_path_name())
-                            except Exception as ex:
-                                errors.append(
-                                    "Row "
-                                    + str(row_index + 1)
-                                    + ": Failed setting unknown-typed prop "
-                                    + str(block_name)
-                                    + "."
-                                    + str(prop_name)
-                                    + " - "
-                                    + str(ex)
-                                )
-
-                        if not set_succeeded:
-                            # final attempt: try to set as generic text stringified JSON
-                            try:
-                                ides.set_property_value_generic_text(
-                                    item_def, block_name, prop_name, json.dumps(value)
-                                )
-                                set_succeeded = True
-                                modified_assets.add(asset.get_path_name())
-                            except Exception as final_ex:
-                                # Collect detailed diagnostic: what the probe returned
-                                errors.append(
-                                    "Row "
-                                    + str(row_index + 1)
-                                    + ": Unable to set property "
-                                    + str(block_name)
-                                    + "."
-                                    + str(prop_name)
-                                    + ". Probe result: "
-                                    + str(prop_type_label)
-                                    + " "
-                                    + repr(current_value)
-                                    + ". Final error: "
-                                    + str(final_ex)
-                                )
-
-                    except Exception as ex:
+                    else:
                         errors.append(
                             "Row "
                             + str(row_index + 1)
-                            + ": Unexpected error setting "
+                            + ": Failed setting "
                             + str(block_name)
                             + "."
                             + str(prop_name)
                             + " - "
-                            + str(ex)
+                            + str(error_msg)
                         )
 
     return errors, list(modified_assets)

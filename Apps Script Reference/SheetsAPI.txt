@@ -1,0 +1,366 @@
+/**
+ * Web API for Sheets:
+ * GET  /tabs        - list all tab names
+ * GET  /schema      - get headers + formula info for a tab
+ * GET  /query       - query rows with optional column/id filters
+ * GET  /dump        - export entire sheet as TSV (for syncing to local files)
+ * POST /patch       - update individual cells (by row number or ID)
+ * POST /deleteRows  - delete rows by row numbers or IDs (shifts remaining rows up)
+ * POST /appendRow   - append a new row at the end of data
+ * POST /setRow      - set multiple columns in a single row (by row number or ID)
+ *
+ * ID Support: Most write endpoints accept either row numbers or ID values.
+ * The ID is the value in the first column (column A) of each row.
+ */
+
+function doGet(e) {
+  const path = (e.parameter.path || "").toLowerCase();
+  try {
+    switch (path) {
+      case "/tabs": return handleTabs(e);
+      case "/schema": return handleSchema(e);
+      case "/query": return handleQuery(e);
+      case "/dump": return handleDump(e);
+      default: return json(404, {error:`Unknown GET path: ${path}`});
+    }
+  } catch (err) {
+    return json(500, {error:err.toString()});
+  }
+}
+
+function doPost(e) {
+  const path = (e.parameter.path || "").toLowerCase();
+  try {
+    switch (path) {
+      case "/patch": return handlePatch(e);
+      case "/deleterows": return handleDeleteRows(e);
+      case "/appendrow": return handleAppendRow(e);
+      case "/setrow": return handleSetRow(e);
+      default: return json(404, {error:`Unknown POST path: ${path}`});
+    }
+  } catch (err) {
+    return json(500, {error:err.toString()});
+  }
+}
+
+/** GET /tabs — list all tab names */
+function handleTabs(e) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tabs = ss.getSheets().map(s => s.getName());
+  return json(200, {tabs});
+}
+
+/** GET /schema — give headers + formulas for a named tab */
+function handleSchema(e) {
+  const sheetName = e.parameter.sheet;
+  if (!sheetName) return json(400, {error:"Missing sheet parameter"});
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return json(404, {error:"Sheet not found"});
+
+  const lastCol = sheet.getLastColumn();
+  const headerRange = sheet.getRange(1,1,1,lastCol);
+  const values = headerRange.getDisplayValues()[0];
+  const formulas = headerRange.getFormulas()[0];
+  const schema = values.map((title, i) => ({
+    index: i+1,
+    title,
+    headerFormula: formulas[i] || null
+  }));
+  return json(200, {sheet: sheetName, schema});
+}
+
+/**
+ * GET /query
+ * Parameters:
+ *   sheet = sheet name
+ *   cols = comma-separated list of column indexes or names
+ *   ids = (optional) comma-separated list of leftmost ID values
+ */
+function handleQuery(e) {
+  const sheetName = e.parameter.sheet;
+  if (!sheetName) return json(400, {error:"Missing sheet parameter"});
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return json(404, {error:"Sheet not found"});
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length === 0) return json(200, {rows:[]});
+
+  const header = data[0];
+  const body = data.slice(1);
+
+  // parse requested columns
+  let cols = [];
+  if (e.parameter.cols) {
+    const raw = String(e.parameter.cols).split(",");
+    cols = raw.map(c => {
+      const idx = Number(c);
+      if (!isNaN(idx)) return idx-1;  // numeric -> 0-based
+      return header.indexOf(c.trim()); // name -> index
+    }).filter(i => i >= 0);
+  } else {
+    cols = header.map((_,i) => i);
+  }
+
+  // optionally filter by IDs in first column
+  let rows = body;
+  if (e.parameter.ids) {
+    const wanted = String(e.parameter.ids).split(",").map(x=>x.trim());
+    rows = body.filter(r => wanted.includes(String(r[0])));
+  }
+
+  // extract only requested columns
+  const results = rows.map(r => {
+    const obj = {};
+    cols.forEach(i => {
+      const key = header[i]||`C${i+1}`;
+      obj[key] = r[i];
+    });
+    return obj;
+  });
+
+  return json(200, {rows:results});
+}
+
+/**
+ * GET /dump
+ * Parameters:
+ *   sheet = sheet name
+ * Returns the entire sheet as TSV (tab-separated values).
+ * Useful for syncing to local TSV files.
+ */
+function handleDump(e) {
+  const sheetName = e.parameter.sheet;
+  if (!sheetName) {
+    return ContentService.createTextOutput("Error: Missing sheet parameter")
+      .setMimeType(ContentService.MimeType.TEXT);
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    return ContentService.createTextOutput("Error: Sheet not found")
+      .setMimeType(ContentService.MimeType.TEXT);
+  }
+
+  const data = sheet.getDataRange().getDisplayValues();
+  const tsv = data.map(row => row.join('\t')).join('\n');
+
+  return ContentService.createTextOutput(tsv)
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
+/**
+ * POST /patch
+ * Body should be JSON: {sheet, changes:[{row, col, value}]}
+ *   row = 1-based row index  OR  id = ID value (first column)
+ *   col = 1-based column index or header name
+ *   value = new value to set
+ */
+function handlePatch(e) {
+  let payload;
+  try {
+    payload = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return json(400, {error:"Invalid JSON"});
+  }
+
+  const sheetName = payload.sheet;
+  if (!sheetName) return json(400, {error:"Missing sheet in body"});
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return json(404, {error:"Sheet not found"});
+
+  const header = sheet.getRange(1,1,1,sheet.getLastColumn()).getDisplayValues()[0];
+
+  // Build ID-to-row lookup if any changes use 'id' instead of 'row'
+  let idToRow = null;
+  payload.changes = payload.changes || [];
+  const needsIdLookup = payload.changes.some(ch => ch.id && !ch.row);
+  if (needsIdLookup) {
+    idToRow = {};
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      idToRow[String(data[i][0])] = i + 1;  // 1-based row
+    }
+  }
+
+  let applied = 0;
+  payload.changes.forEach(ch => {
+    let row = ch.row;
+    let col = ch.col;
+
+    // If id provided instead of row, look it up
+    if (!row && ch.id && idToRow) {
+      row = idToRow[String(ch.id)];
+    }
+
+    // allow header names as col identifiers
+    if (typeof col === "string") {
+      const idx = header.indexOf(col);
+      if (idx >= 0) col = idx+1;
+    }
+    if (row >= 1 && col >= 1) {
+      sheet.getRange(row, col).setValue(ch.value);
+      applied++;
+    }
+  });
+
+  return json(200, {status:"ok", applied:applied});
+}
+
+/**
+ * POST /deleteRows
+ * Body: {sheet, rows:[5, 6, 7]}  OR  {sheet, ids:["id1", "id2"]}
+ *   rows = array of 1-based row indexes to delete
+ *   ids = array of ID values (first column) to delete
+ * Deletes rows in descending order to preserve row numbers during deletion.
+ * Returns count of deleted rows.
+ */
+function handleDeleteRows(e) {
+  let payload;
+  try {
+    payload = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return json(400, {error:"Invalid JSON"});
+  }
+
+  const sheetName = payload.sheet;
+  if (!sheetName) return json(400, {error:"Missing sheet in body"});
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return json(404, {error:"Sheet not found"});
+
+  let rowsToDelete = [];
+
+  // Option 1: rows specified directly as numbers
+  if (payload.rows && Array.isArray(payload.rows) && payload.rows.length > 0) {
+    rowsToDelete = payload.rows.map(Number).filter(r => r >= 2);
+  }
+  // Option 2: ids specified - need to look up row numbers
+  else if (payload.ids && Array.isArray(payload.ids) && payload.ids.length > 0) {
+    const data = sheet.getDataRange().getValues();
+    const idsToFind = payload.ids.map(String);
+    for (let i = 1; i < data.length; i++) {  // skip header
+      const rowId = String(data[i][0]);
+      if (idsToFind.includes(rowId)) {
+        rowsToDelete.push(i + 1);  // convert to 1-based
+      }
+    }
+  }
+  else {
+    return json(400, {error:"Missing rows or ids array"});
+  }
+
+  // Sort descending so we delete from bottom to top (preserves row numbers)
+  const sortedRows = rowsToDelete.sort((a, b) => b - a);
+
+  sortedRows.forEach(row => {
+    sheet.deleteRow(row);
+  });
+
+  return json(200, {status:"ok", deleted:sortedRows.length});
+}
+
+/**
+ * POST /appendRow
+ * Body: {sheet, data:{col1:val1, col2:val2, ...}}
+ *   data = object mapping column names to values
+ * Appends a new row at the end of the data.
+ * Returns the new row number.
+ */
+function handleAppendRow(e) {
+  let payload;
+  try {
+    payload = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return json(400, {error:"Invalid JSON"});
+  }
+
+  const sheetName = payload.sheet;
+  if (!sheetName) return json(400, {error:"Missing sheet in body"});
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return json(404, {error:"Sheet not found"});
+
+  const data = payload.data || {};
+  if (Object.keys(data).length === 0) {
+    return json(400, {error:"Missing or empty data object"});
+  }
+
+  const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+  const newRow = header.map(colName => data[colName] !== undefined ? data[colName] : "");
+
+  sheet.appendRow(newRow);
+  const newRowNumber = sheet.getLastRow();
+
+  return json(200, {status:"ok", row:newRowNumber});
+}
+
+/**
+ * POST /setRow
+ * Body: {sheet, row:5, data:{...}}  OR  {sheet, id:"rowId", data:{...}}
+ *   row = 1-based row index
+ *   id = ID value (first column) to find the row
+ *   data = object mapping column names to values
+ * Sets multiple columns in a single row.
+ * Only updates columns specified in data; others are unchanged.
+ */
+function handleSetRow(e) {
+  let payload;
+  try {
+    payload = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return json(400, {error:"Invalid JSON"});
+  }
+
+  const sheetName = payload.sheet;
+  if (!sheetName) return json(400, {error:"Missing sheet in body"});
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return json(404, {error:"Sheet not found"});
+
+  let row = payload.row;
+
+  // If id provided instead of row, look up the row number
+  if (!row && payload.id) {
+    const data = sheet.getDataRange().getValues();
+    const targetId = String(payload.id);
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === targetId) {
+        row = i + 1;  // convert to 1-based
+        break;
+      }
+    }
+    if (!row) return json(404, {error:`ID not found: ${payload.id}`});
+  }
+
+  if (!row || row < 2) return json(400, {error:"Missing or invalid row/id (row must be >= 2)"});
+
+  const data = payload.data || {};
+  if (Object.keys(data).length === 0) {
+    return json(400, {error:"Missing or empty data object"});
+  }
+
+  const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+  let updated = 0;
+
+  Object.keys(data).forEach(colName => {
+    const colIndex = header.indexOf(colName);
+    if (colIndex >= 0) {
+      sheet.getRange(row, colIndex + 1).setValue(data[colName]);
+      updated++;
+    }
+  });
+
+  return json(200, {status:"ok", row:row, updated:updated});
+}
+
+/** Helper to return JSON with correct MIME */
+function json(status, obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj, null, 2))
+    .setMimeType(ContentService.MimeType.JSON);
+}

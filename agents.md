@@ -75,9 +75,35 @@ The script auto-detects property types and handles:
 - **gameplay_tag_container**: `{"Tags": {"Tags": ["Tag.One", "Tag.Two"]}}`
 - **generic_text**: strings, enums, asset paths
 
-# Change Detection
+## Single FGameplayTag Support
 
-The script only checks out and saves assets when values actually change. If the new value matches the current value, no modification occurs - avoiding unnecessary source control operations.
+For properties that are a single `FGameplayTag` (not a container), use the dict format:
+
+```json
+{"EssenceDefinition": {"AbilityTag": {"TagName": "Husky.ItemDefinition.Skill.MonsoonTrailer"}}}
+```
+
+The script automatically converts `{"TagName": "..."}` to Unreal's struct format `(TagName="...")`.
+
+This also works for other simple struct properties - any dict value in a generic_text property will be converted to Unreal struct format.
+
+# Change Detection & Checkout Optimization
+
+The script uses a **collect-then-apply** pattern to minimize source control operations:
+
+1. **Phase 1 (Read-Only)**: Probe all properties to detect which ones need changes
+   - Reads current values using getter APIs
+   - Compares against new values from the spreadsheet
+   - Builds a list of changes needed
+
+2. **Phase 2 (Apply)**: Only if changes are detected, apply them
+   - Calls `add_component_data_entry()` only for blocks with actual changes
+   - Sets property values only for properties that differ
+
+**Benefits:**
+- Assets with no changes are never checked out from source control
+- Reduces unnecessary file locks and checkout operations
+- Faster imports when re-running with same/similar data
 
 # Files
 

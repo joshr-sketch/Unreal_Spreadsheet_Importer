@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.google.com)",
+      "Bash(git -C \"C:/Dev/Agents/Unreal_Spreadsheet_Importer\" status)",
+      "Bash(git -C \"C:/Dev/Agents/Unreal_Spreadsheet_Importer\" diff agents.md importer_script_python.py)",
+      "Bash(git -C \"C:/Dev/Agents/Unreal_Spreadsheet_Importer\" log --oneline -5)",
+      "Bash(git -C \"C:/Dev/Agents/Unreal_Spreadsheet_Importer\" add agents.md importer_script_python.py)",
+      "Bash(git -C \"C:/Dev/Agents/Unreal_Spreadsheet_Importer\" commit -m \"$\\(cat <<''EOF''\nAdd FGameplayTag dict-to-struct conversion and documentation updates\n\n- Handle single FGameplayTag properties passed as {\"TagName\": \"...\"} by\n  automatically converting to Unreal struct format \\(TagName=\"...\"\\)\n- Add generic dict-to-struct conversion for other struct properties\n- Expand agents.md with base property documentation and AI agent reminder\n  about curly brace restrictions in comments\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C \"C:/Dev/Agents/Unreal_Spreadsheet_Importer\" push)",
+      "Bash(py -m py_compile:*)",
+      "Bash(git -C \"C:/Dev/Agents/Unreal_Spreadsheet_Importer\" diff --stat)",
+      "mcp__hodor__hodor_search_tools",
+      "mcp__hodor__hodor_describe_tool",
+      "mcp__hodor__hodor_execute_tool",
+      "mcp__hodor__hodor_status",
+      "mcp__ue__list_toolsets",
+      "Bash(powershell -ExecutionPolicy Bypass -File:*)",
+      "mcp__ue__describe_toolset",
+      "mcp__ue__call_tool",
+      "Bash(powershell -Command:*)",
+      "Bash(copy \"C:\\\\Dev\\\\Agents\\\\Unreal_Spreadsheet_Importer\\\\tsv_import_toolset.py\" \"D:\\\\projects\\\\DevBulldog\\\\FortniteGame\\\\Plugins\\\\GameFeatures\\\\Husky\\\\Husky_DeveloperTools\\\\Content\\\\Python\\\\tsv_import_toolset.py\")",
+      "Bash(npm update:*)",
+      "Bash(chmod:*)",
+      "Bash(p4 edit:*)",
+      "Bash(p4 add:*)",
+      "Bash(py -c:*)",
+      "Bash(python3:*)",
+      "Bash($tsv)",
+      "WebSearch",
+      "mcp__hodor__hodor_list_tools",
+      "mcp__hodor__hodor_list_providers",
+      "mcp__hodor__search_docs",
+      "Bash(Get-ChildItem \"D:\\\\projects\\\\DevBulldog\\\\FortniteGame\\\\Saved\\\\Logs\" -Filter \"*.log\")",
+      "Bash(Sort-Object LastWriteTime -Descending)",
+      "Bash(Select-Object -First 1)",
+      "Bash(ForEach-Object { Get-Content $_FullName -Tail 200 })",
+      "Bash(Select-String -Pattern \"Hodor|MCP|OAuth|google\" -CaseSensitive:$false)"
+    ]
+  }
+}
