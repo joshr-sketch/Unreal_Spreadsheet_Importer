@@ -422,6 +422,7 @@ class TSVImportToolset(unreal.ToolsetDefinition):
         result = {
             "success": False,
             "rows_imported": 0,
+            "datatable_used": "",
             "assets_modified": [],
             "assets_created": [],
             "errors": [],
@@ -429,6 +430,40 @@ class TSVImportToolset(unreal.ToolsetDefinition):
         }
 
         try:
+            # Resolve DataTable path if just a name was provided (e.g. "DT_MyTable")
+            original_dt_path = dt_path
+            if dt_path and "/" not in dt_path and "." not in dt_path:
+                # Search for matching DataTable by name
+                ar = unreal.AssetRegistryHelpers.get_asset_registry()
+                all_dts = ar.get_assets_by_class(unreal.TopLevelAssetPath("/Script/Engine", "DataTable"))
+
+                cell_clean = dt_path.strip()
+                resolved = None
+
+                # Try exact match first
+                for dt in all_dts:
+                    if str(dt.asset_name) == cell_clean:
+                        resolved = str(dt.package_name) + "." + str(dt.asset_name)
+                        break
+
+                # Try case-insensitive / partial match
+                if not resolved:
+                    cell_lower = cell_clean.lower()
+                    for dt in all_dts:
+                        asset_name = str(dt.asset_name).lower()
+                        if cell_lower == asset_name or cell_lower in asset_name or asset_name in cell_lower:
+                            resolved = str(dt.package_name) + "." + str(dt.asset_name)
+                            break
+
+                if resolved:
+                    dt_path = resolved
+                    unreal.log(f"import_tsv_string: Resolved '{original_dt_path}' -> '{dt_path}'")
+                else:
+                    result["errors"].append(f"Could not find DataTable matching '{original_dt_path}'")
+                    return json.dumps(result)
+
+            result["datatable_used"] = dt_path
+
             # Get DataTable schema for case-insensitive column matching
             dt_schema = _get_datatable_schema(dt_path)
 

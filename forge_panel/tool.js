@@ -4,14 +4,26 @@
  * Imports Google Sheets data into Unreal DataTables.
  * UI: Presets -> Spreadsheet dropdown -> Available Tabs list -> Import Queue list
  * Auto-detects target DataTable from cell A1 of each sheet.
+ *
+ * Supports two data fetch modes:
+ * - 'hodor': Uses Hodor MCP for Google APIs (team-friendly, no local credentials)
+ * - 'direct': Uses Python toolset's direct Google API calls (requires local OAuth tokens)
  */
 
 const PRESETS_STORAGE_KEY = 'spreadsheet_importer_presets';
+const CONFIG_STORAGE_KEY = 'spreadsheet_importer_config';
+
+// Default config - can be changed via UI or localStorage
+const DEFAULT_CONFIG = {
+    fetchMode: 'hodor',  // 'hodor' or 'direct'
+    nameFilter: 'TSV'    // Filter spreadsheets by name
+};
 
 host.registerPanel({
     id: 'Spreadsheet_Importer',
 
     // State
+    config: { ...DEFAULT_CONFIG },
     spreadsheets: [],
     selectedSpreadsheet: null,
     selectedPreset: null,
@@ -23,7 +35,8 @@ host.registerPanel({
     async render(root) {
         root.classList.add('ue-root');
 
-        // Load saved presets
+        // Load saved config and presets
+        this.loadConfig();
         this.loadPresets();
 
         root.innerHTML = `
@@ -94,6 +107,13 @@ host.registerPanel({
                         <h3 class="ue-head">Import Results</h3>
                         <div id="resultsContent" class="results-empty">Run an import to see results</div>
                     </div>
+                    <div class="config-section">
+                        <label class="ue-label">Data Source</label>
+                        <div class="row">
+                            <button id="modeHodorBtn" class="ue-btn mode-btn ${this.config.fetchMode === 'hodor' ? 'active' : ''}" title="Use Hodor (team OAuth)">Hodor</button>
+                            <button id="modeDirectBtn" class="ue-btn mode-btn ${this.config.fetchMode === 'direct' ? 'active' : ''}" title="Use direct API (local OAuth)">Direct</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         `;
@@ -101,6 +121,41 @@ host.registerPanel({
         this.bindEvents(root);
         this.renderPresetDropdown();
         await this.loadSpreadsheets();
+    },
+
+    // Config Management
+    loadConfig() {
+        try {
+            const stored = localStorage.getItem(CONFIG_STORAGE_KEY);
+            if (stored) {
+                this.config = { ...DEFAULT_CONFIG, ...JSON.parse(stored) };
+            }
+        } catch (e) {
+            this.config = { ...DEFAULT_CONFIG };
+        }
+    },
+
+    saveConfig() {
+        try {
+            localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(this.config));
+        } catch (e) {
+            host.log('error', 'Failed to save config:', e);
+        }
+    },
+
+    setFetchMode(mode) {
+        this.config.fetchMode = mode;
+        this.saveConfig();
+
+        // Update button states
+        document.getElementById('modeHodorBtn')?.classList.toggle('active', mode === 'hodor');
+        document.getElementById('modeDirectBtn')?.classList.toggle('active', mode === 'direct');
+
+        this.setStatus(`Switched to ${mode === 'hodor' ? 'Hodor' : 'Direct'} mode`);
+        setTimeout(() => this.setStatus(''), 2000);
+
+        // Reload spreadsheets with new mode
+        this.loadSpreadsheets();
     },
 
     bindEvents(root) {
@@ -112,6 +167,10 @@ host.registerPanel({
         const removeFromQueueBtn = root.querySelector('#removeFromQueueBtn');
         const clearQueueBtn = root.querySelector('#clearQueueBtn');
         const importBtn = root.querySelector('#importBtn');
+
+        // Mode toggle buttons
+        root.querySelector('#modeHodorBtn')?.addEventListener('click', () => this.setFetchMode('hodor'));
+        root.querySelector('#modeDirectBtn')?.addEventListener('click', () => this.setFetchMode('direct'));
 
         // Custom preset dropdown handlers
         const presetDropdown = root.querySelector('#presetDropdown');
@@ -362,6 +421,129 @@ host.registerPanel({
         return result;
     },
 
+    // =========================================================================
+    // HODOR MODE: Google API calls via Hodor MCP
+    // =========================================================================
+
+    async hodorCall(toolName, args) {
+        await mcp.ready();
+        const result = await mcp.call('mcp__hodor__hodor_execute_tool', {
+            tool_name: toolName,
+            arguments: args
+        });
+        return this.parseResult(result);
+    },
+
+    async loadSpreadsheetsHodor() {
+        const query = `mimeType='application/vnd.google-apps.spreadsheet' and name contains '${this.config.nameFilter}' and trashed=false`;
+        const result = await this.hodorCall('google_drive_list', {
+            query: query,
+            pageSize: 50
+        });
+
+        if (result.files) {
+            return result.files.map(f => ({
+                id: f.id,
+                name: f.name,
+                modifiedTime: f.modifiedTime
+            }));
+        }
+        return [];
+    },
+
+    async loadTabsHodor(spreadsheetId) {
+        const result = await this.hodorCall('google_sheets_get_sheet_names', {
+            spreadsheetId: spreadsheetId
+        });
+
+        if (result.sheets) {
+            return result.sheets.map(s => s.title);
+        }
+        return [];
+    },
+
+    async fetchSheetDataHodor(spreadsheetId, tabName) {
+        const range = `'${tabName}'!A:ZZ`;
+        const result = await this.hodorCall('google_sheets_read_range', {
+            spreadsheetId: spreadsheetId,
+            range: range
+        });
+
+        return result.values || [];
+    },
+
+    // Convert 2D array to TSV string
+    valuesToTsv(values) {
+        if (!values || values.length === 0) return '';
+        return values.map(row =>
+            row.map(cell => {
+                const str = cell != null ? String(cell) : '';
+                // Escape tabs and newlines
+                return str.replace(/\t/g, ' ').replace(/\n/g, '\\n').replace(/\r/g, '');
+            }).join('\t')
+        ).join('\n');
+    },
+
+    async importTabHodor(spreadsheetId, tabName) {
+        // 1. Fetch sheet data via Hodor
+        const values = await this.fetchSheetDataHodor(spreadsheetId, tabName);
+
+        if (values.length < 2) {
+            return { success: false, error: 'Sheet has no data rows' };
+        }
+
+        // 2. Get A1 value (DataTable name) and replace with "---" for row key
+        const dtName = values[0][0] || '';
+        values[0][0] = '---';
+
+        // 3. Convert to TSV
+        const tsvContent = this.valuesToTsv(values);
+
+        // 4. Call Python toolset to do the actual import
+        await mcp.ready();
+        const result = await mcp.call('tsv_import_toolset.TSVImportToolset.import_tsv_string', {
+            tsv_content: tsvContent,
+            dt_path: dtName  // Let Python resolve the DataTable path
+        });
+
+        return this.parseResult(result);
+    },
+
+    // =========================================================================
+    // DIRECT MODE: Google API calls via Python toolset (existing behavior)
+    // =========================================================================
+
+    async loadSpreadsheetsDirect() {
+        const result = await mcp.call('tsv_import_toolset.TSVImportToolset.list_spreadsheets', {
+            name_filter: this.config.nameFilter
+        });
+        const parsed = this.parseResult(result);
+        if (!parsed.success) throw new Error(parsed.error || 'Failed to load spreadsheets');
+        return parsed.spreadsheets || [];
+    },
+
+    async loadTabsDirect(spreadsheetId) {
+        const result = await mcp.call('tsv_import_toolset.TSVImportToolset.get_spreadsheet_tabs', {
+            spreadsheet_id: spreadsheetId
+        });
+        const parsed = this.parseResult(result);
+        if (!parsed.success) throw new Error(parsed.error || 'Failed to load tabs');
+        return parsed.tabs || [];
+    },
+
+    async importTabDirect(spreadsheetId, tabName) {
+        const result = await mcp.call('tsv_import_toolset.TSVImportToolset.import_tab_to_datatable', {
+            spreadsheet_id: spreadsheetId,
+            tab_name: tabName,
+            dt_path: ''
+        });
+        return this.parseResult(result);
+    },
+
+    // =========================================================================
+    // UNIFIED API (routes to Hodor or Direct based on config)
+    // =========================================================================
+
     async loadSpreadsheets() {
         const header = document.getElementById('spreadsheetHeader');
         const list = document.getElementById('spreadsheetList');
@@ -370,20 +552,15 @@ host.registerPanel({
         // Show loading state immediately
         if (headerText) headerText.textContent = 'Loading...';
         if (list) list.innerHTML = '';
-        this.setStatus('Loading spreadsheets...');
+        this.setStatus(`Loading spreadsheets (${this.config.fetchMode} mode)...`);
 
         try {
             await mcp.ready();
 
-            const result = await mcp.call('tsv_import_toolset.TSVImportToolset.list_spreadsheets', {
-                name_filter: 'TSV'
-            });
+            this.spreadsheets = this.config.fetchMode === 'hodor'
+                ? await this.loadSpreadsheetsHodor()
+                : await this.loadSpreadsheetsDirect();
 
-            const parsed = this.parseResult(result);
-
-            if (!parsed.success) throw new Error(parsed.error || 'Failed to load spreadsheets');
-
-            this.spreadsheets = parsed.spreadsheets || [];
             const count = this.spreadsheets.length;
 
             // Update header
@@ -415,14 +592,10 @@ host.registerPanel({
         try {
             await mcp.ready();
 
-            const result = await mcp.call('tsv_import_toolset.TSVImportToolset.get_spreadsheet_tabs', {
-                spreadsheet_id: this.selectedSpreadsheet.id
-            });
-            const parsed = this.parseResult(result);
+            this.availableTabs = this.config.fetchMode === 'hodor'
+                ? await this.loadTabsHodor(this.selectedSpreadsheet.id)
+                : await this.loadTabsDirect(this.selectedSpreadsheet.id);
 
-            if (!parsed.success) throw new Error(parsed.error || 'Failed to load tabs');
-
-            this.availableTabs = parsed.tabs || [];
             this.renderAvailableTabs();
 
             this.setStatus(`Loaded ${this.availableTabs.length} tabs`);
@@ -431,6 +604,81 @@ host.registerPanel({
         } catch (err) {
             host.log('error', 'Failed to load tabs:', err);
             this.setStatus(err.message, true);
+        }
+    },
+
+    async doImport() {
+        if (this.importQueue.length === 0 || this.isLoading) return;
+
+        this.setLoading(true);
+        this.setStatus(`Importing ${this.importQueue.length} sheets (${this.config.fetchMode} mode)...`);
+
+        const results = [];
+        let totalRows = 0;
+        let totalErrors = 0;
+        let allSuccess = true;
+
+        try {
+            await mcp.ready();
+
+            for (const item of this.importQueue) {
+                this.setStatus(`Importing ${item.tabName}...`);
+
+                try {
+                    let result;
+                    if (this.config.fetchMode === 'hodor') {
+                        result = await this.importTabHodor(item.spreadsheetId, item.tabName);
+                    } else {
+                        result = await this.importTabDirect(item.spreadsheetId, item.tabName);
+                    }
+
+                    results.push({
+                        tab_name: item.tabName,
+                        datatable: result.datatable_used || result.dt_path || '',
+                        success: result.success,
+                        rows_imported: result.rows_imported || 0,
+                        errors: result.errors || []
+                    });
+
+                    totalRows += result.rows_imported || 0;
+                    totalErrors += (result.errors || []).length;
+                    if (!result.success) allSuccess = false;
+
+                } catch (err) {
+                    results.push({
+                        tab_name: item.tabName,
+                        datatable: '',
+                        success: false,
+                        rows_imported: 0,
+                        errors: [`Import failed: ${err.message}`]
+                    });
+                    totalErrors++;
+                    allSuccess = false;
+                }
+            }
+
+            const parsed = {
+                success: allSuccess,
+                results: results,
+                total_rows: totalRows,
+                total_errors: totalErrors
+            };
+
+            this.showResults(parsed);
+
+            if (allSuccess) {
+                this.setStatus('Import complete!');
+                host.notify(`Imported ${totalRows} rows from ${this.importQueue.length} sheets`, 'success');
+            } else {
+                this.setStatus(`Import completed with ${totalErrors} errors`, true);
+            }
+
+        } catch (err) {
+            host.log('error', 'Import failed:', err);
+            this.setStatus('Import failed: ' + err.message, true);
+            host.notify('Import failed: ' + err.message, 'error');
+        } finally {
+            this.setLoading(false);
         }
     },
 
@@ -542,46 +790,6 @@ host.registerPanel({
     clearQueue() {
         this.importQueue = [];
         this.renderImportQueue();
-    },
-
-    async doImport() {
-        if (this.importQueue.length === 0 || this.isLoading) return;
-
-        this.setLoading(true);
-        this.setStatus(`Importing ${this.importQueue.length} sheets...`);
-
-        try {
-            await mcp.ready();
-
-            const importItems = this.importQueue.map(item => ({
-                spreadsheet_id: item.spreadsheetId,
-                tab_name: item.tabName,
-                dt_path: ""
-            }));
-
-            const result = await mcp.call('tsv_import_toolset.TSVImportToolset.batch_import_tabs', {
-                import_items: JSON.stringify(importItems)
-            });
-
-            const parsed = this.parseResult(result);
-
-            this.showResults(parsed);
-
-            if (parsed.success) {
-                this.setStatus('Import complete!');
-                host.notify(`Imported ${parsed.total_rows} rows from ${this.importQueue.length} sheets`, 'success');
-                // Queue is NOT cleared - allows reimport
-            } else {
-                this.setStatus(`Import completed with ${parsed.total_errors} errors`, true);
-            }
-
-        } catch (err) {
-            host.log('error', 'Import failed:', err);
-            this.setStatus('Import failed: ' + err.message, true);
-            host.notify('Import failed: ' + err.message, 'error');
-        } finally {
-            this.setLoading(false);
-        }
     },
 
     showResults(result) {

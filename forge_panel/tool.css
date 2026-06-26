@@ -395,3 +395,28 @@
     content: "• ";
     color: #ff6b6b;
 }
+
+/* Config Section */
+.config-section {
+    margin-top: auto;
+    padding-top: 10px;
+    border-top: 1px solid var(--border, #3a3a3a);
+}
+
+.config-section .row {
+    display: flex;
+    gap: 4px;
+}
+
+.mode-btn {
+    flex: 1;
+    padding: 6px 8px;
+    font-size: 11px;
+    text-align: center;
+}
+
+.mode-btn.active {
+    background: var(--accent, #0078d4);
+    border-color: var(--accent, #0078d4);
+    color: #fff;
+}
