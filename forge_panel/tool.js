@@ -1,13 +1,12 @@
 /**
  * Spreadsheet Importer Forge Panel
  *
- * Imports Google Sheets data into Unreal DataTables.
+ * Imports Google Sheets data into Unreal DataTables via Hodor MCP.
  * UI: Presets -> Spreadsheet dropdown -> Available Tabs list -> Import Queue list
  * Auto-detects target DataTable from cell A1 of each sheet.
  *
- * Supports two data fetch modes:
- * - 'hodor': Uses Hodor MCP for Google APIs (team-friendly, no local credentials)
- * - 'direct': Uses Python toolset's direct Google API calls (requires local OAuth tokens)
+ * Requires Hodor MCP server configured in Editor Preferences > MCP Client Toolset.
+ * Click "Authorize Google" to connect your Google account on first use.
  */
 
 const PRESETS_STORAGE_KEY = 'spreadsheet_importer_presets';
@@ -15,7 +14,6 @@ const CONFIG_STORAGE_KEY = 'spreadsheet_importer_config';
 
 // Default config - can be changed via UI or localStorage
 const DEFAULT_CONFIG = {
-    fetchMode: 'hodor',  // 'hodor' or 'direct'
     nameFilter: 'TSV'    // Filter spreadsheets by name
 };
 
@@ -108,10 +106,9 @@ host.registerPanel({
                         <div id="resultsContent" class="results-empty">Run an import to see results</div>
                     </div>
                     <div class="config-section">
-                        <label class="ue-label">Data Source</label>
+                        <label class="ue-label">Hodor Connection</label>
                         <div class="row">
-                            <button id="modeHodorBtn" class="ue-btn mode-btn ${this.config.fetchMode === 'hodor' ? 'active' : ''}" title="Use Hodor (team OAuth)">Hodor</button>
-                            <button id="modeDirectBtn" class="ue-btn mode-btn ${this.config.fetchMode === 'direct' ? 'active' : ''}" title="Use direct API (local OAuth)">Direct</button>
+                            <button id="authGoogleBtn" class="ue-btn flex-1" title="Authorize Google in Hodor">🔑 Authorize Google</button>
                         </div>
                     </div>
                 </div>
@@ -143,21 +140,6 @@ host.registerPanel({
         }
     },
 
-    setFetchMode(mode) {
-        this.config.fetchMode = mode;
-        this.saveConfig();
-
-        // Update button states
-        document.getElementById('modeHodorBtn')?.classList.toggle('active', mode === 'hodor');
-        document.getElementById('modeDirectBtn')?.classList.toggle('active', mode === 'direct');
-
-        this.setStatus(`Switched to ${mode === 'hodor' ? 'Hodor' : 'Direct'} mode`);
-        setTimeout(() => this.setStatus(''), 2000);
-
-        // Reload spreadsheets with new mode
-        this.loadSpreadsheets();
-    },
-
     bindEvents(root) {
         const savePresetBtn = root.querySelector('#savePresetBtn');
         const deletePresetBtn = root.querySelector('#deletePresetBtn');
@@ -168,9 +150,8 @@ host.registerPanel({
         const clearQueueBtn = root.querySelector('#clearQueueBtn');
         const importBtn = root.querySelector('#importBtn');
 
-        // Mode toggle buttons
-        root.querySelector('#modeHodorBtn')?.addEventListener('click', () => this.setFetchMode('hodor'));
-        root.querySelector('#modeDirectBtn')?.addEventListener('click', () => this.setFetchMode('direct'));
+        // Hodor auth button
+        root.querySelector('#authGoogleBtn')?.addEventListener('click', () => this.authorizeGoogle());
 
         // Custom preset dropdown handlers
         const presetDropdown = root.querySelector('#presetDropdown');
@@ -425,9 +406,119 @@ host.registerPanel({
     // HODOR MODE: Google API calls via Hodor MCP
     // =========================================================================
 
+    async authorizeGoogle() {
+        this.setStatus('Starting Google authorization...');
+        try {
+            await mcp.ready();
+            const result = await mcp.call('Hodor.hodor_authorize', { provider: 'google' });
+            let parsed = this.parseResult(result);
+
+            // Handle nested JSON (response may have {text: "..."} wrapper)
+            if (parsed.text && typeof parsed.text === 'string') {
+                try { parsed = JSON.parse(parsed.text); } catch(e) {}
+            }
+
+            host.log('info', 'Auth result:', JSON.stringify(parsed));
+
+            // Find the auth URL in various possible response formats
+            const authUrl = parsed.authorize_url || parsed.authorization_url || parsed.auth_url || parsed.url;
+            const flowId = parsed.flow_id;
+
+            if (authUrl) {
+                this.setStatus('Copy the URL below and open in browser');
+                this._pendingFlowId = flowId;
+
+                // Show copyable URL in results panel
+                const content = document.getElementById('resultsContent');
+                if (content) {
+                    content.innerHTML = `
+                        <div style="margin-bottom: 8px;">
+                            <label class="ue-label">Auth URL (copy and open in browser):</label>
+                        </div>
+                        <textarea id="authUrlBox" readonly style="
+                            width: 100%;
+                            height: 60px;
+                            font-size: 10px;
+                            background: var(--inputBg, #2a2a2a);
+                            border: 1px solid var(--border, #3a3a3a);
+                            border-radius: 4px;
+                            color: var(--text, #ddd);
+                            padding: 6px;
+                            resize: none;
+                        ">${authUrl}</textarea>
+                        <div class="row" style="margin-top: 8px;">
+                            <button id="copyUrlBtn" class="ue-btn flex-1">📋 Copy URL</button>
+                            <button id="checkAuthBtn" class="ue-btn flex-1">✓ Check Auth Status</button>
+                        </div>
+                        <div style="margin-top: 10px; font-size: 11px; color: #999;">
+                            1. Copy URL and paste in browser<br>
+                            2. Complete Google login<br>
+                            3. Click "Check Auth Status" or refresh spreadsheets
+                        </div>
+                    `;
+
+                    // Bind copy button
+                    content.querySelector('#copyUrlBtn')?.addEventListener('click', () => {
+                        const box = document.getElementById('authUrlBox');
+                        box.select();
+                        document.execCommand('copy');
+                        this.setStatus('URL copied to clipboard!');
+                    });
+
+                    // Bind check status button
+                    content.querySelector('#checkAuthBtn')?.addEventListener('click', () => this.checkAuthStatus());
+                }
+            } else if (parsed.status === 'already_authorized' || parsed.already_authorized) {
+                this.setStatus('Google already authorized! Refreshing...');
+                setTimeout(() => this.loadSpreadsheets(), 1000);
+            } else {
+                // Show full response for debugging
+                this.setStatus('Auth response received. Check results panel.');
+                const content = document.getElementById('resultsContent');
+                if (content) {
+                    content.innerHTML = `<pre style="font-size: 10px; white-space: pre-wrap;">${JSON.stringify(parsed, null, 2)}</pre>`;
+                }
+            }
+        } catch (err) {
+            host.log('error', 'Google auth failed:', err);
+            this.setStatus('Auth failed: ' + err.message, true);
+        }
+    },
+
+    async checkAuthStatus() {
+        if (!this._pendingFlowId) {
+            this.setStatus('No pending auth flow', true);
+            return;
+        }
+        this.setStatus('Checking auth status...');
+        try {
+            await mcp.ready();
+            const result = await mcp.call('Hodor.hodor_execute_tool', {
+                tool_name: 'check_authorization_status',
+                arguments: { flow_id: this._pendingFlowId }
+            });
+            let parsed = this.parseResult(result);
+            if (parsed.text && typeof parsed.text === 'string') {
+                try { parsed = JSON.parse(parsed.text); } catch(e) {}
+            }
+
+            if (parsed.status === 'authorized' || parsed.status === 'complete' || parsed.authorized) {
+                this.setStatus('Google authorized! Refreshing spreadsheets...');
+                this._pendingFlowId = null;
+                setTimeout(() => this.loadSpreadsheets(), 500);
+            } else {
+                this.setStatus(`Auth status: ${parsed.status || 'pending'}. Complete login in browser.`);
+            }
+        } catch (err) {
+            this.setStatus('Check failed: ' + err.message, true);
+        }
+    },
+
     async hodorCall(toolName, args) {
+        // Call Hodor tools through Unreal's MCP Client Toolset
+        // Hodor exposes tools via hodor_execute_tool meta-interface
         await mcp.ready();
-        const result = await mcp.call('mcp__hodor__hodor_execute_tool', {
+        const result = await mcp.call('Hodor.hodor_execute_tool', {
             tool_name: toolName,
             arguments: args
         });
@@ -436,10 +527,20 @@ host.registerPanel({
 
     async loadSpreadsheetsHodor() {
         const query = `mimeType='application/vnd.google-apps.spreadsheet' and name contains '${this.config.nameFilter}' and trashed=false`;
-        const result = await this.hodorCall('google_drive_list', {
+        let result = await this.hodorCall('google_drive_list', {
             query: query,
             pageSize: 50
         });
+
+        // Log raw result for debugging
+        host.log('info', 'Hodor google_drive_list raw result:', JSON.stringify(result).substring(0, 500));
+
+        // Handle nested JSON response (Hodor may wrap in {text: "..."})
+        if (result.text && typeof result.text === 'string') {
+            try { result = JSON.parse(result.text); } catch(e) {}
+        }
+
+        host.log('info', 'Hodor google_drive_list parsed:', JSON.stringify(result).substring(0, 500));
 
         if (result.files) {
             return result.files.map(f => ({
@@ -452,9 +553,16 @@ host.registerPanel({
     },
 
     async loadTabsHodor(spreadsheetId) {
-        const result = await this.hodorCall('google_sheets_get_sheet_names', {
+        let result = await this.hodorCall('google_sheets_get_sheet_names', {
             spreadsheetId: spreadsheetId
         });
+
+        // Handle nested JSON response
+        if (result.text && typeof result.text === 'string') {
+            try { result = JSON.parse(result.text); } catch(e) {}
+        }
+
+        host.log('info', 'Hodor get_sheet_names:', JSON.stringify(result).substring(0, 500));
 
         if (result.sheets) {
             return result.sheets.map(s => s.title);
@@ -464,10 +572,17 @@ host.registerPanel({
 
     async fetchSheetDataHodor(spreadsheetId, tabName) {
         const range = `'${tabName}'!A:ZZ`;
-        const result = await this.hodorCall('google_sheets_read_range', {
+        let result = await this.hodorCall('google_sheets_read_range', {
             spreadsheetId: spreadsheetId,
             range: range
         });
+
+        // Handle nested JSON response
+        if (result.text && typeof result.text === 'string') {
+            try { result = JSON.parse(result.text); } catch(e) {}
+        }
+
+        host.log('info', 'Hodor read_range rows:', result.values ? result.values.length : 0);
 
         return result.values || [];
     },
@@ -510,38 +625,7 @@ host.registerPanel({
     },
 
     // =========================================================================
-    // DIRECT MODE: Google API calls via Python toolset (existing behavior)
-    // =========================================================================
-
-    async loadSpreadsheetsDirect() {
-        const result = await mcp.call('tsv_import_toolset.TSVImportToolset.list_spreadsheets', {
-            name_filter: this.config.nameFilter
-        });
-        const parsed = this.parseResult(result);
-        if (!parsed.success) throw new Error(parsed.error || 'Failed to load spreadsheets');
-        return parsed.spreadsheets || [];
-    },
-
-    async loadTabsDirect(spreadsheetId) {
-        const result = await mcp.call('tsv_import_toolset.TSVImportToolset.get_spreadsheet_tabs', {
-            spreadsheet_id: spreadsheetId
-        });
-        const parsed = this.parseResult(result);
-        if (!parsed.success) throw new Error(parsed.error || 'Failed to load tabs');
-        return parsed.tabs || [];
-    },
-
-    async importTabDirect(spreadsheetId, tabName) {
-        const result = await mcp.call('tsv_import_toolset.TSVImportToolset.import_tab_to_datatable', {
-            spreadsheet_id: spreadsheetId,
-            tab_name: tabName,
-            dt_path: ''
-        });
-        return this.parseResult(result);
-    },
-
-    // =========================================================================
-    // UNIFIED API (routes to Hodor or Direct based on config)
+    // MAIN API
     // =========================================================================
 
     async loadSpreadsheets() {
@@ -552,14 +636,11 @@ host.registerPanel({
         // Show loading state immediately
         if (headerText) headerText.textContent = 'Loading...';
         if (list) list.innerHTML = '';
-        this.setStatus(`Loading spreadsheets (${this.config.fetchMode} mode)...`);
+        this.setStatus('Loading spreadsheets...');
 
         try {
             await mcp.ready();
-
-            this.spreadsheets = this.config.fetchMode === 'hodor'
-                ? await this.loadSpreadsheetsHodor()
-                : await this.loadSpreadsheetsDirect();
+            this.spreadsheets = await this.loadSpreadsheetsHodor();
 
             const count = this.spreadsheets.length;
 
@@ -591,10 +672,7 @@ host.registerPanel({
         this.setStatus('Loading tabs...');
         try {
             await mcp.ready();
-
-            this.availableTabs = this.config.fetchMode === 'hodor'
-                ? await this.loadTabsHodor(this.selectedSpreadsheet.id)
-                : await this.loadTabsDirect(this.selectedSpreadsheet.id);
+            this.availableTabs = await this.loadTabsHodor(this.selectedSpreadsheet.id);
 
             this.renderAvailableTabs();
 
@@ -611,7 +689,7 @@ host.registerPanel({
         if (this.importQueue.length === 0 || this.isLoading) return;
 
         this.setLoading(true);
-        this.setStatus(`Importing ${this.importQueue.length} sheets (${this.config.fetchMode} mode)...`);
+        this.setStatus(`Importing ${this.importQueue.length} sheets...`);
 
         const results = [];
         let totalRows = 0;
@@ -625,12 +703,7 @@ host.registerPanel({
                 this.setStatus(`Importing ${item.tabName}...`);
 
                 try {
-                    let result;
-                    if (this.config.fetchMode === 'hodor') {
-                        result = await this.importTabHodor(item.spreadsheetId, item.tabName);
-                    } else {
-                        result = await this.importTabDirect(item.spreadsheetId, item.tabName);
-                    }
+                    const result = await this.importTabHodor(item.spreadsheetId, item.tabName);
 
                     results.push({
                         tab_name: item.tabName,

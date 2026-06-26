@@ -407,16 +407,3 @@
     display: flex;
     gap: 4px;
 }
-
-.mode-btn {
-    flex: 1;
-    padding: 6px 8px;
-    font-size: 11px;
-    text-align: center;
-}
-
-.mode-btn.active {
-    background: var(--accent, #0078d4);
-    border-color: var(--accent, #0078d4);
-    color: #fff;
-}
