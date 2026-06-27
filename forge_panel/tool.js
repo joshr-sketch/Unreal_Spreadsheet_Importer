@@ -232,14 +232,19 @@ host.registerPanel({
         });
 
         // Close dropdowns when clicking outside
-        document.addEventListener('click', (e) => {
+        // Remove any previous handler to prevent accumulation on re-render
+        if (this._documentClickHandler) {
+            document.removeEventListener('click', this._documentClickHandler);
+        }
+        this._documentClickHandler = (e) => {
             if (!dropdown.contains(e.target)) {
                 dropdown.classList.remove('open');
             }
             if (!presetDropdown.contains(e.target)) {
                 presetDropdown.classList.remove('open');
             }
-        });
+        };
+        document.addEventListener('click', this._documentClickHandler);
 
         refreshSpreadsheetsBtn.addEventListener('click', () => this.loadSpreadsheets());
         addToQueueBtn.addEventListener('click', () => this.addSelectedToQueue());
@@ -948,7 +953,13 @@ host.registerPanel({
 
     onActivate() {},
     onDeactivate() {},
-    onClose() {},
+    onClose() {
+        // Clean up document-level event listener to prevent memory leaks
+        if (this._documentClickHandler) {
+            document.removeEventListener('click', this._documentClickHandler);
+            this._documentClickHandler = null;
+        }
+    },
 
     onError(err) {
         host.log('error', 'Panel error:', err);
