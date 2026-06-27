@@ -462,7 +462,7 @@ host.registerPanel({
                             color: var(--text, #ddd);
                             padding: 6px;
                             resize: none;
-                        ">${authUrl}</textarea>
+                        ">${escapeHtml(authUrl)}</textarea>
                         <div class="row" style="margin-top: 8px;">
                             <button id="copyUrlBtn" class="ue-btn flex-1">📋 Copy URL</button>
                             <button id="checkAuthBtn" class="ue-btn flex-1">✓ Check Auth Status</button>
@@ -588,7 +588,9 @@ host.registerPanel({
     },
 
     async fetchSheetDataHodor(spreadsheetId, tabName) {
-        const range = `'${tabName}'!A:ZZ`;
+        // Escape single quotes in tab name for A1 notation (double them)
+        const escapedTabName = tabName.replace(/'/g, "''");
+        const range = `'${escapedTabName}'!A:ZZ`;
         let result = await this.hodorCall('google_sheets_read_range', {
             spreadsheetId: spreadsheetId,
             range: range
