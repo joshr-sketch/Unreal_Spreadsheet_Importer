@@ -33,6 +33,54 @@ import urllib.request
 import urllib.parse
 import ssl
 import time
+import os
+import shutil
+
+
+# ============================================================================
+# Auto-install Forge Panel
+# ============================================================================
+
+def _install_forge_panel():
+    """Copy Forge panel files from plugin Content to Saved/Forge/tools on startup."""
+    try:
+        # Source: Plugin's Content/Forge/Spreadsheet_Importer/
+        plugin_content = os.path.dirname(os.path.abspath(__file__))
+        source_dir = os.path.join(plugin_content, "Forge", "Spreadsheet_Importer")
+
+        # Destination: Project's Saved/Forge/tools/Spreadsheet_Importer/
+        project_dir = str(unreal.Paths.project_dir())
+        dest_dir = os.path.join(project_dir, "Saved", "Forge", "tools", "Spreadsheet_Importer")
+
+        if not os.path.exists(source_dir):
+            return  # Source doesn't exist, skip silently
+
+        # Create destination directory
+        os.makedirs(dest_dir, exist_ok=True)
+
+        # Files to copy
+        files = ["tool.js", "tool.css", "tool.json"]
+        installed = []
+
+        for fname in files:
+            src = os.path.join(source_dir, fname)
+            dst = os.path.join(dest_dir, fname)
+
+            if not os.path.exists(src):
+                continue
+
+            # Only copy if source is newer or dest doesn't exist
+            if not os.path.exists(dst) or os.path.getmtime(src) > os.path.getmtime(dst):
+                shutil.copy2(src, dst)
+                installed.append(fname)
+
+        if installed:
+            unreal.log(f"SpreadsheetImporter: Installed Forge panel ({', '.join(installed)})")
+    except Exception as ex:
+        unreal.log_warning(f"SpreadsheetImporter: Failed to install Forge panel: {ex}")
+
+# Run auto-install on module load
+_install_forge_panel()
 
 
 # ============================================================================
