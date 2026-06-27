@@ -173,6 +173,8 @@ def _get_access_token():
         if not _refresh_oauth_token(tokens):
             raise Exception("Failed to refresh OAuth token")
         tokens = _load_oauth_tokens()
+        if not tokens:
+            raise Exception("Failed to reload tokens after refresh")
 
     return tokens["access_token"]
 

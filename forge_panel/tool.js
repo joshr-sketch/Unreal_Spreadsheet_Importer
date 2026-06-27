@@ -28,6 +28,12 @@ function escapeHtml(str) {
         .replace(/'/g, '&#39;');
 }
 
+// Regex escape utility for external data used in RegExp constructors
+function escapeRegex(str) {
+    if (str == null) return '';
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 host.registerPanel({
     id: 'Spreadsheet_Importer',
 
@@ -487,7 +493,7 @@ host.registerPanel({
                 this.setStatus('Auth response received. Check results panel.');
                 const content = document.getElementById('resultsContent');
                 if (content) {
-                    content.innerHTML = `<pre style="font-size: 10px; white-space: pre-wrap;">${JSON.stringify(parsed, null, 2)}</pre>`;
+                    content.innerHTML = `<pre style="font-size: 10px; white-space: pre-wrap;">${escapeHtml(JSON.stringify(parsed, null, 2))}</pre>`;
                 }
             }
         } catch (err) {
@@ -922,7 +928,7 @@ host.registerPanel({
 
     formatError(err, tabName) {
         // Remove redundant [TabName] prefix if present (since we group by tab)
-        let msg = err.replace(new RegExp(`^\\[${tabName}\\]\\s*`, 'i'), '');
+        let msg = err.replace(new RegExp(`^\\[${escapeRegex(tabName)}\\]\\s*`, 'i'), '');
 
         // Enhance cryptic Unreal errors with context
         const colMatch = msg.match(/Missing.*?column\s*(\d+)/i) ||
