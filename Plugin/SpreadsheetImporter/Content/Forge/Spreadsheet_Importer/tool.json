@@ -1,0 +1,7 @@
+{
+  "name": "Spreadsheet Importer",
+  "description": "Import Google Sheets data into DataTables via Hodor MCP",
+  "category": "Tools|Data",
+  "icon": "📊",
+  "version": "1.0.0"
+}
