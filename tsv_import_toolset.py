@@ -109,10 +109,16 @@ def _load_oauth_tokens():
 
 
 def _save_oauth_tokens(tokens):
-    """Save OAuth tokens back to the token file."""
+    """Save OAuth tokens back to the token file with restrictive permissions."""
     try:
         with open(TOKEN_PATH, "w", encoding="utf-8") as f:
             json.dump(tokens, f, indent=2)
+        # Restrict file permissions to owner-only (0o600) for security
+        # This protects refresh tokens on multi-user systems
+        try:
+            os.chmod(TOKEN_PATH, 0o600)
+        except OSError:
+            pass  # Windows may not support chmod, but tokens are still saved
     except Exception as ex:
         unreal.log_error(f"Failed to save OAuth tokens: {ex}")
 
