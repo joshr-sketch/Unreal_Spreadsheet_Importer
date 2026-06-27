@@ -630,7 +630,7 @@ host.registerPanel({
         const values = await this.fetchSheetDataHodor(spreadsheetId, tabName);
 
         if (values.length < 2) {
-            return { success: false, error: 'Sheet has no data rows' };
+            return { success: false, errors: ['Sheet has no data rows'] };
         }
 
         // 2. Get A1 value (DataTable name) and replace with "---" for row key
