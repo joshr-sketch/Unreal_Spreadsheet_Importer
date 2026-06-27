@@ -290,7 +290,7 @@ host.registerPanel({
             list.innerHTML = '<div class="list-empty">No presets saved</div>';
         } else {
             list.innerHTML = presetNames.map(name =>
-                `<div class="list-item" data-preset-name="${name}">${name}</div>`
+                `<div class="list-item" data-preset-name="${escapeHtml(name)}">${escapeHtml(name)}</div>`
             ).join('');
         }
 
@@ -543,7 +543,9 @@ host.registerPanel({
     },
 
     async loadSpreadsheetsHodor() {
-        const query = `mimeType='application/vnd.google-apps.spreadsheet' and name contains '${this.config.nameFilter}' and trashed=false`;
+        // Escape single quotes in nameFilter for Drive query syntax
+        const escapedFilter = (this.config.nameFilter || '').replace(/'/g, "\\'");
+        const query = `mimeType='application/vnd.google-apps.spreadsheet' and name contains '${escapedFilter}' and trashed=false`;
         let result = await this.hodorCall('google_drive_list', {
             query: query,
             pageSize: 50
