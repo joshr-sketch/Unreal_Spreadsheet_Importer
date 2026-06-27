@@ -17,6 +17,17 @@ const DEFAULT_CONFIG = {
     nameFilter: 'TSV'    // Filter spreadsheets by name
 };
 
+// HTML escape utility to prevent XSS from external data (spreadsheet/tab names)
+function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 host.registerPanel({
     id: 'Spreadsheet_Importer',
 
@@ -652,7 +663,7 @@ host.registerPanel({
             // Populate dropdown list
             if (list) {
                 list.innerHTML = this.spreadsheets.map(ss =>
-                    `<div class="list-item" data-spreadsheet-id="${ss.id}" data-spreadsheet-name="${ss.name}">${ss.name}</div>`
+                    `<div class="list-item" data-spreadsheet-id="${escapeHtml(ss.id)}" data-spreadsheet-name="${escapeHtml(ss.name)}">${escapeHtml(ss.name)}</div>`
                 ).join('');
             }
 
@@ -765,7 +776,7 @@ host.registerPanel({
         }
 
         list.innerHTML = this.availableTabs.map(tabName =>
-            `<div class="list-item" data-tab-name="${tabName}">${tabName}</div>`
+            `<div class="list-item" data-tab-name="${escapeHtml(tabName)}">${escapeHtml(tabName)}</div>`
         ).join('');
 
         // Force Chromium repaint
@@ -799,8 +810,8 @@ host.registerPanel({
 
         list.innerHTML = this.importQueue.map((item, index) => `
             <div class="list-item" data-index="${index}">
-                <span class="queue-tab">${item.tabName}</span>
-                <span class="queue-source">${item.spreadsheetName}</span>
+                <span class="queue-tab">${escapeHtml(item.tabName)}</span>
+                <span class="queue-source">${escapeHtml(item.spreadsheetName)}</span>
             </div>
         `).join('');
 
@@ -889,7 +900,7 @@ host.registerPanel({
                 const statusClass = r.success ? 'success' : 'error';
                 const dtName = r.datatable ? r.datatable.split('/').pop().split('.')[0] : 'N/A';
                 html += `<li class="${statusClass}">
-                    ${status} <strong>${r.tab_name}</strong> → ${dtName} (${r.rows_imported || 0} rows)
+                    ${status} <strong>${escapeHtml(r.tab_name)}</strong> → ${escapeHtml(dtName)} (${r.rows_imported || 0} rows)
                 </li>`;
 
                 // Show ALL errors, not just the first one
@@ -898,7 +909,7 @@ host.registerPanel({
                     r.errors.forEach(err => {
                         // Clean up error message for display
                         const cleanErr = this.formatError(err, r.tab_name);
-                        html += `<li class="error">${cleanErr}</li>`;
+                        html += `<li class="error">${escapeHtml(cleanErr)}</li>`;
                     });
                     html += '</ul>';
                 }

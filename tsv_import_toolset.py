@@ -84,12 +84,18 @@ _install_forge_panel()
 
 
 # ============================================================================
-# Google Sheets API Configuration
+# Google Sheets API Configuration (LEGACY - use Hodor MCP instead)
 # ============================================================================
+# These settings are only used for direct Google API access, which is deprecated.
+# The Forge panel now uses Hodor MCP for Google Sheets access.
+# To use direct API access, set these environment variables:
+#   SPREADSHEET_IMPORTER_SHEETS_API - Apps Script deployment URL
+#   SPREADSHEET_IMPORTER_TOKEN_PATH - Path to oauth-tokens.json
+#   SPREADSHEET_IMPORTER_CREDENTIALS_PATH - Path to client_secret.json
 
-SHEETS_API_BASE = "https://script.google.com/a/macros/epicgames.com/s/AKfycbyMAExewqv71sHoVYyJFLV4S91wGTjcyRJ17nrKeLqJ99yvm7RCZc9-pUS1ECAnM3j0/exec"
-TOKEN_PATH = "C:/Dev/Agents/1/Husky-EUI-Prototype/google-sheets-integration/oauth-tokens.json"
-CREDENTIALS_PATH = "C:/Dev/credentials/client_secret_187005099682-k61uojia7lhn501rdtge3obkfo5g74rr.apps.googleusercontent.com.json"
+SHEETS_API_BASE = os.environ.get("SPREADSHEET_IMPORTER_SHEETS_API", "")
+TOKEN_PATH = os.environ.get("SPREADSHEET_IMPORTER_TOKEN_PATH", "")
+CREDENTIALS_PATH = os.environ.get("SPREADSHEET_IMPORTER_CREDENTIALS_PATH", "")
 
 
 def _load_oauth_tokens():
@@ -488,18 +494,18 @@ class TSVImportToolset(unreal.ToolsetDefinition):
                 cell_clean = dt_path.strip()
                 resolved = None
 
-                # Try exact match first
+                # Try exact match first (case-sensitive)
                 for dt in all_dts:
                     if str(dt.asset_name) == cell_clean:
                         resolved = str(dt.package_name) + "." + str(dt.asset_name)
                         break
 
-                # Try case-insensitive / partial match
+                # Try case-insensitive exact match only (no substring matching)
                 if not resolved:
                     cell_lower = cell_clean.lower()
                     for dt in all_dts:
                         asset_name = str(dt.asset_name).lower()
-                        if cell_lower == asset_name or cell_lower in asset_name or asset_name in cell_lower:
+                        if cell_lower == asset_name:
                             resolved = str(dt.package_name) + "." + str(dt.asset_name)
                             break
 
@@ -919,11 +925,11 @@ class TSVImportToolset(unreal.ToolsetDefinition):
                     result["success"] = True
                     return json.dumps(result)
 
-            # Try partial match (asset name contains the cell value)
+            # Try case-insensitive exact match only (no substring matching)
             cell_lower = cell_clean.lower()
             for dt in all_dts:
                 asset_name = str(dt.asset_name).lower()
-                if cell_lower in asset_name or asset_name in cell_lower:
+                if cell_lower == asset_name:
                     result["datatable_path"] = str(dt.package_name) + "." + str(dt.asset_name)
                     result["success"] = True
                     return json.dumps(result)
@@ -983,11 +989,11 @@ class TSVImportToolset(unreal.ToolsetDefinition):
                         break
 
                 if not dt_path:
-                    # Try partial match
+                    # Try case-insensitive exact match only (no substring matching)
                     cell_lower = cell_clean.lower()
                     for dt in all_dts:
                         asset_name = str(dt.asset_name).lower()
-                        if cell_lower in asset_name or asset_name in cell_lower:
+                        if cell_lower == asset_name:
                             dt_path = str(dt.package_name) + "." + str(dt.asset_name)
                             break
 
